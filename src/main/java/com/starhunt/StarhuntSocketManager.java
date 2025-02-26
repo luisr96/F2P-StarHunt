@@ -1,0 +1,198 @@
+package com.starhunt;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.coords.WorldPoint;
+
+import javax.inject.Inject;
+import javax.inject.Singleton;
+import java.net.URI;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import org.java_websocket.client.WebSocketClient;
+import org.java_websocket.handshake.ServerHandshake;
+
+@Slf4j
+@Singleton
+public class StarhuntSocketManager {
+
+    private final Gson gson;
+    private WebSocketClient client;
+    private final List<Object> listeners = new ArrayList<>();
+    private boolean isConnecting = false;
+
+    @Inject
+    private ScheduledExecutorService executor;
+
+    @Inject
+    private StarhuntConfig config;
+
+    @Inject
+    public StarhuntSocketManager() {
+        this.gson = createGsonInstance();
+    }
+
+    private Gson createGsonInstance() {
+        return new GsonBuilder()
+                .registerTypeAdapter(WorldPoint.class, new WorldPointAdapter())
+                .registerTypeAdapter(Instant.class, new InstantAdapter())
+                .create();
+    }
+
+    public void connect(URI serverUri) {
+        // Check if we're already connected or connecting
+        if (client != null && client.isOpen()) {
+            log.info("Already connected to a websocket server");
+            return;
+        }
+
+        if (isConnecting) {
+            log.info("Already attempting to connect to a websocket server");
+            return;
+        }
+
+        isConnecting = true;
+
+        try {
+            client = new WebSocketClient(serverUri) {
+                @Override
+                public void onOpen(ServerHandshake handshakedata) {
+                    log.info("Connected to Starhunt server");
+                    isConnecting = false;
+                    notifyListeners("onWebsocketConnected");
+                }
+
+                @Override
+                public void onMessage(String message) {
+                    handleMessage(message);
+                }
+
+                @Override
+                public void onClose(int code, String reason, boolean remote) {
+                    log.info("Disconnected from Starhunt server: {} (code: {})", reason, code);
+                    isConnecting = false;
+                    notifyListeners("onWebsocketDisconnected");
+                }
+
+                @Override
+                public void onError(Exception ex) {
+                    log.error("Websocket error", ex);
+                    isConnecting = false;
+                }
+            };
+
+            // Set up keep-alive ping
+            executor.scheduleAtFixedRate(() -> {
+                if (client != null && client.isOpen()) {
+                    client.sendPing();
+                }
+            }, 30, 30, TimeUnit.SECONDS);
+
+            client.connect();
+        } catch (Exception e) {
+            log.error("Failed to initialize WebSocket connection", e);
+            isConnecting = false;
+            throw e;
+        }
+    }
+
+    public void disconnect() {
+        if (client != null && client.isOpen()) {
+            client.close();
+        }
+        isConnecting = false;
+    }
+
+    public void sendStarData(StarData star) {
+        if (client == null || !client.isOpen()) {
+            return;
+        }
+
+        try {
+            // Create a message payload
+            MessagePayload payload = new MessagePayload();
+            payload.setType(MessageType.STAR_UPDATE);
+            payload.setData(star);
+
+            String message = gson.toJson(payload);
+            client.send(message);
+        } catch (Exception e) {
+            log.error("Failed to send star data", e);
+        }
+    }
+
+    private void handleMessage(String message) {
+        try {
+            MessagePayload payload = gson.fromJson(message, MessagePayload.class);
+
+            if (payload.getType() == MessageType.STAR_UPDATE) {
+                StarData star = gson.fromJson(gson.toJson(payload.getData()), StarData.class);
+                notifyListenersWithStar(star);
+            }
+        } catch (Exception e) {
+            log.error("Failed to parse message", e);
+        }
+    }
+
+    public void registerListener(Object listener) {
+        if (!listeners.contains(listener)) {
+            listeners.add(listener);
+        }
+    }
+
+    public void unregisterListener(Object listener) {
+        listeners.remove(listener);
+    }
+
+    private void notifyListeners(String methodName) {
+        for (Object listener : listeners) {
+            try {
+                listener.getClass().getMethod(methodName).invoke(listener);
+            } catch (Exception e) {
+                log.error("Failed to notify listener", e);
+            }
+        }
+    }
+
+    private void notifyListenersWithStar(StarData star) {
+        for (Object listener : listeners) {
+            try {
+                listener.getClass().getMethod("onStarDataReceived", StarData.class).invoke(listener, star);
+            } catch (Exception e) {
+                log.error("Failed to notify listener with star data", e);
+            }
+        }
+    }
+
+    private enum MessageType {
+        STAR_UPDATE,
+        PLAYER_JOIN,
+        PLAYER_LEAVE
+    }
+
+    private static class MessagePayload {
+        private MessageType type;
+        private Object data;
+
+        public MessageType getType() {
+            return type;
+        }
+
+        public void setType(MessageType type) {
+            this.type = type;
+        }
+
+        public Object getData() {
+            return data;
+        }
+
+        public void setData(Object data) {
+            this.data = data;
+        }
+    }
+}

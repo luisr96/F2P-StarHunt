@@ -5,257 +5,352 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.GameObjectDespawned;
+import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.NpcDespawned;
+import net.runelite.api.events.NpcSpawned;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
-import net.runelite.client.ui.ClientToolbar;
-import net.runelite.client.ui.NavigationButton;
-import net.runelite.client.util.ImageUtil;
-import java.awt.image.BufferedImage;
+
+import java.net.URI;
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
-import java.util.stream.Collectors;
+import lombok.Getter;
+import net.runelite.client.ui.overlay.OverlayManager;
 
 @Slf4j
 @PluginDescriptor(
-		name = "F2P StarHunt"
+		name = "Starhunt",
+		description = "Shares shooting star locations with other players",
+		tags = {"shooting", "star", "mining", "share"}
 )
 public class StarhuntPlugin extends Plugin
 {
+	private static final int NPC_ID = NullNpcID.NULL_10629;
+	private static final int MAX_RECONNECT_ATTEMPTS = 5;
+	private static final int RECONNECT_DELAY_MS = 5000;
+
 	@Inject
 	private Client client;
+
+	@Inject
+	private ClientThread clientThread;
 
 	@Inject
 	private StarhuntConfig config;
 
 	@Inject
-	private ClientToolbar clientToolbar;
+	private StarhuntSocketManager socketManager;
 
-	private NavigationButton navButton;
-	private StarhuntPanel panel;
+	@Inject
+	private StarhuntOverlay overlay;
 
-	// Store found stars to prevent duplicates
-	private final Map<String, StarData> foundStars = new HashMap<>();
+	@Inject
+	private OverlayManager overlayManager;
 
-	// Track stars currently in view
-	private final Set<String> starsInView = new HashSet<>();
+	// Stars that we've discovered locally
+	private final List<StarData> stars = new ArrayList<>();
 
-	// Track when we last checked for stars to limit API calls
-	private Instant lastDataSync;
-	private static final int SYNC_INTERVAL_SECONDS = 60; // Sync every minute
+	// Stars received from the network
+	@Getter
+	private final List<StarData> networkStars = new ArrayList<>();
 
-	@Override
-	protected void startUp() throws Exception
-	{
-		log.info("F2P StarHunt started!");
-
-		// Initialize the panel
-		panel = new StarhuntPanel();
-
-		try {
-			// Load the icon
-			final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/star_icon.png");
-
-			navButton = NavigationButton.builder()
-					.tooltip("F2P StarHunt")
-					.icon(icon)
-					.priority(5)
-					.panel(panel)
-					.build();
-		} catch (Exception e) {
-			// Fallback if icon can't be loaded
-			log.warn("Couldn't load icon", e);
-
-			navButton = NavigationButton.builder()
-					.tooltip("F2P StarHunt")
-					.priority(5)
-					.panel(panel)
-					.build();
-		}
-
-		clientToolbar.addNavigation(navButton);
-		lastDataSync = Instant.now().minusSeconds(SYNC_INTERVAL_SECONDS); // Force initial sync
-	}
-
-	@Override
-	protected void shutDown() throws Exception
-	{
-		log.info("F2P StarHunt stopped!");
-		clientToolbar.removeNavigation(navButton);
-		foundStars.clear();
-	}
-
-	@Subscribe
-	public void onGameTick(GameTick event)
-	{
-		if (!config.autoTrack())
-		{
-			return;
-		}
-
-		// Clear the set of stars in view
-		starsInView.clear();
-
-		// Check for stars
-		scanForStars();
-
-		// Remove any stars that are no longer in view
-		checkForDepletedStars();
-
-		// Check if we should sync with server
-		if (Instant.now().isAfter(lastDataSync.plusSeconds(SYNC_INTERVAL_SECONDS)))
-		{
-			syncWithServer();
-			lastDataSync = Instant.now();
-		}
-	}
-
-	private void scanForStars()
-	{
-		// Get all objects in the scene
-		List<GameObject> objects = Arrays.stream(client.getScene().getTiles())
-				.flatMap(Arrays::stream)
-				.flatMap(Arrays::stream)
-				.filter(tile -> tile != null)
-				.flatMap(tile -> Arrays.stream(tile.getGameObjects()))
-				.filter(obj -> obj != null)
-				.collect(Collectors.toList());
-
-		// Check each object to see if it's a star
-		for (GameObject object : objects)
-		{
-			StarTier tier = StarTier.fromObjectId(object.getId());
-			if (tier != null)
-			{
-				// Star found! Process it
-				processFoundStar(object, tier);
-
-				// Add to our view set
-				String key = getStarKey(object.getWorldLocation(), client.getWorld());
-				starsInView.add(key);
-			}
-		}
-	}
-
-	private void checkForDepletedStars()
-	{
-		// Create a copy of the keys to avoid ConcurrentModificationException
-		List<String> currentStars = new ArrayList<>(foundStars.keySet());
-
-		for (String key : currentStars)
-		{
-			// If a star was in foundStars but not in our current view, it might be depleted
-			if (!starsInView.contains(key))
-			{
-				StarData star = foundStars.get(key);
-
-				// Only remove if the star is in the current world
-				// (we don't want to remove stars from other worlds)
-				if (star.getWorld() == client.getWorld())
-				{
-					// Check if it's in our render distance
-					WorldPoint playerLocation = client.getLocalPlayer().getWorldLocation();
-					int distance = star.getLocation().distanceTo2D(playerLocation);
-
-					// Only remove if we're close enough that we should be able to see it
-					// (render distance is approximately 32 tiles)
-					if (distance <= 32)
-					{
-						log.debug("Star depleted at {}",
-								star.getLocationName() != null ? star.getLocationName().getName() : "Unknown");
-
-						// Remove from our tracking
-						foundStars.remove(key);
-
-						// Update the panel
-						panel.removeStar(key);
-
-						// TODO: Update server that star is depleted
-					}
-				}
-			}
-		}
-	}
-
-	// Helper method to generate a consistent unique key
-	private String getStarKey(WorldPoint location, int world)
-	{
-		return world + ":" + location.getX() + ":" + location.getY() + ":" + location.getPlane();
-	}
-
-	private void processFoundStar(GameObject object, StarTier tier)
-	{
-		WorldPoint location = object.getWorldLocation();
-		StarLocation starLocation = StarLocation.getClosestLocation(location);
-
-		// Create unique key
-		String key = getStarKey(location, client.getWorld());
-
-		// Create star data
-		StarData starData = new StarData(
-				client.getWorld(),
-				location,
-				starLocation,
-				tier,
-				Instant.now(),
-				client.getLocalPlayer().getName()
-		);
-
-		// Only add if we haven't seen this star before
-		if (!foundStars.containsKey(key))
-		{
-			foundStars.put(key, starData);
-			panel.addStar(starData);
-			log.debug("Found new star: {} at {} ({})",
-					tier.getName(),
-					starLocation != null ? starLocation.getName() : "Unknown",
-					location);
-
-			// TODO: Send to server/database
-		}
-		else
-		{
-			// Update the tier if it changed
-			StarData existingStar = foundStars.get(key);
-			if (existingStar.getTier() != tier)
-			{
-				existingStar.setTier(tier);
-				panel.updateStar(existingStar);
-				log.debug("Updated star tier: {} at {}",
-						tier.getName(),
-						starLocation != null ? starLocation.getName() : "Unknown");
-
-				// TODO: Update server/database
-			}
-		}
-	}
-
-	private void syncWithServer()
-	{
-		// TODO: Implement server sync
-		log.debug("Syncing with server...");
-
-		// This would fetch the latest stars from the server
-		// For now, just keep our local copy
-	}
-
-	@Subscribe
-	public void onGameStateChanged(GameStateChanged gameStateChanged)
-	{
-		if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
-		{
-			// Sync with server on login
-			syncWithServer();
-		}
-	}
+	private int reconnectAttempts = 0;
+	private boolean connected = false;
 
 	@Provides
 	StarhuntConfig provideConfig(ConfigManager configManager)
 	{
 		return configManager.getConfig(StarhuntConfig.class);
+	}
+
+	@Override
+	protected void startUp() throws Exception
+	{
+		socketManager.registerListener(this);
+		overlayManager.add(overlay);
+		connectToServer();
+	}
+
+	@Override
+	protected void shutDown() throws Exception
+	{
+		socketManager.unregisterListener(this);
+		socketManager.disconnect();
+		overlayManager.remove(overlay);
+		stars.clear();
+		networkStars.clear();
+		connected = false;
+		reconnectAttempts = 0;
+	}
+
+	private void connectToServer()
+	{
+		if (config.websocketUrl().isEmpty())
+		{
+			log.warn("Websocket URL is not configured, star data will not be shared");
+			return;
+		}
+
+		try
+		{
+			socketManager.connect(new URI(config.websocketUrl()));
+			connected = true;
+			reconnectAttempts = 0;
+		}
+		catch (Exception e)
+		{
+			log.error("Failed to connect to websocket server", e);
+			if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS)
+			{
+				reconnectAttempts++;
+				log.info("Attempting to reconnect ({}/{})", reconnectAttempts, MAX_RECONNECT_ATTEMPTS);
+				new Thread(() -> {
+					try
+					{
+						Thread.sleep(RECONNECT_DELAY_MS);
+						connectToServer();
+					}
+					catch (InterruptedException ie)
+					{
+						Thread.currentThread().interrupt();
+					}
+				}).start();
+			}
+		}
+	}
+
+	public void onWebsocketConnected()
+	{
+		log.info("Connected to Starhunt server");
+		connected = true;
+		// Send any existing stars we have
+		for (StarData star : stars) {
+			sendStarData(star);
+		}
+	}
+
+	public void onWebsocketDisconnected()
+	{
+		log.info("Disconnected from Starhunt server");
+		connected = false;
+		connectToServer();
+	}
+
+	public void onStarDataReceived(StarData starData)
+	{
+		// Handle incoming star data
+		clientThread.invokeLater(() -> {
+			if (client.getGameState() != GameState.LOGGED_IN) {
+				return;
+			}
+
+			// Check if we already know about this star in our network list
+			boolean found = false;
+			for (StarData existingStar : networkStars) {
+				if (existingStar.getWorld() == starData.getWorld() &&
+						existingStar.getWorldPoint().equals(starData.getWorldPoint())) {
+					// Update our existing star with new information
+					existingStar.update(starData);
+					found = true;
+					break;
+				}
+			}
+
+			// Add new star if we're not tracking it yet
+			if (!found) {
+				networkStars.add(starData);
+
+				// Sort stars by last update time (newest first)
+				networkStars.sort(Comparator.comparing(StarData::getLastUpdate).reversed());
+
+				// Show notification if enabled
+				if (config.showNotifications() && starData.isActive() && starData.getTier() > 0) {
+					client.addChatMessage(
+							ChatMessageType.GAMEMESSAGE,
+							"",
+							"[Starhunt] New star found: W" + starData.getWorld() +
+									" T" + starData.getTier() + " " + starData.getLocation(),
+							""
+					);
+				}
+			}
+
+			// If this is a star in our world, check if we need to update our local list
+			if (starData.getWorld() == client.getWorld()) {
+				for (StarData localStar : stars) {
+					if (localStar.getWorldPoint().equals(starData.getWorldPoint())) {
+						// We're already tracking this star locally
+						return;
+					}
+				}
+
+				// This is a star in our world that we're not tracking locally
+				// Only add it if it's active
+				if (starData.isActive()) {
+					// Create a new local star. We don't have the NPC or GameObject,
+					// but we can still show it's location
+					stars.add(starData);
+				}
+			}
+		});
+	}
+
+	private void sendStarData(StarData star)
+	{
+		if (connected && config.shareStarData()) {
+			// Set discoverer if configured
+			if (config.shareUsername()) {
+				star.setDiscoveredBy(client.getLocalPlayer().getName());
+			}
+
+			// Set latest update time
+			star.setLastUpdate(Instant.now());
+
+			socketManager.sendStarData(star);
+		}
+	}
+
+	@Subscribe
+	public void onNpcSpawned(NpcSpawned event)
+	{
+		if (event.getNpc().getId() != NPC_ID) {
+			return;
+		}
+
+		NPC npc = event.getNpc();
+		WorldPoint worldPoint = npc.getWorldLocation();
+
+		// Check if we already have this star
+		for (StarData star : stars) {
+			if (star.getWorldPoint().equals(worldPoint)) {
+				star.setNpc(npc);
+				sendStarData(star);
+				return;
+			}
+		}
+
+		// Create new star
+		StarData star = new StarData(npc, client.getWorld());
+		stars.add(star);
+		sendStarData(star);
+	}
+
+	@Subscribe
+	public void onNpcDespawned(NpcDespawned event)
+	{
+		if (event.getNpc().getId() != NPC_ID) {
+			return;
+		}
+
+		WorldPoint worldPoint = event.getNpc().getWorldLocation();
+
+		// Find the star and update it
+		for (StarData star : stars) {
+			if (star.getWorldPoint().equals(worldPoint)) {
+				star.setNpc(null);
+				sendStarData(star);
+				return;
+			}
+		}
+	}
+
+	@Subscribe
+	public void onGameObjectSpawned(GameObjectSpawned event)
+	{
+		int tier = StarData.getTier(event.getGameObject().getId());
+		if (tier < 0) {
+			return;
+		}
+
+		GameObject obj = event.getGameObject();
+		WorldPoint worldPoint = obj.getWorldLocation();
+
+		// Check if we already have this star
+		for (StarData star : stars) {
+			if (star.getWorldPoint().equals(worldPoint)) {
+				star.setObject(obj);
+				star.resetHealth();
+				sendStarData(star);
+				return;
+			}
+		}
+
+		// Create new star
+		StarData star = new StarData(obj, client.getWorld());
+		stars.add(star);
+		sendStarData(star);
+	}
+
+	@Subscribe
+	public void onGameObjectDespawned(GameObjectDespawned event)
+	{
+		int tier = StarData.getTier(event.getGameObject().getId());
+		if (tier < 0) {
+			return;
+		}
+
+		WorldPoint worldPoint = event.getGameObject().getWorldLocation();
+
+		// Find the star and update/remove it
+		for (StarData star : stars) {
+			if (star.getWorldPoint().equals(worldPoint)) {
+				star.setObject(null);
+				// We'll keep it in our list in case it respawns but mark it as inactive
+				star.setActive(false);
+				sendStarData(star);
+				return;
+			}
+		}
+	}
+
+	@Subscribe
+	public void onGameTick(GameTick tick)
+	{
+		if (!connected || !config.shareStarData() || stars.isEmpty()) {
+			return;
+		}
+
+		// Update our nearby stars and send updates
+		for (StarData star : stars) {
+			if (star.isNearby(client.getLocalPlayer().getWorldLocation(), config.maxUpdateDistance())) {
+				// Only update stars that are nearby to avoid unnecessary updates
+				boolean updated = star.update(client);
+				if (updated) {
+					sendStarData(star);
+				}
+			}
+		}
+	}
+
+	@Subscribe
+	public void onGameStateChanged(GameStateChanged event)
+	{
+		if (event.getGameState() == GameState.HOPPING || event.getGameState() == GameState.LOGIN_SCREEN) {
+			stars.clear();
+		}
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (!event.getGroup().equals("starhunt")) {
+			return;
+		}
+
+		if (event.getKey().equals("websocketUrl")) {
+			socketManager.disconnect();
+			connected = false;
+			reconnectAttempts = 0;
+			connectToServer();
+		}
 	}
 }
