@@ -18,6 +18,11 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 
+import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.ImageUtil;
+import java.awt.image.BufferedImage;
+
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -56,6 +61,16 @@ public class StarhuntPlugin extends Plugin
 	@Inject
 	private OverlayManager overlayManager;
 
+	// Add these fields to StarhuntPlugin class
+	@Inject
+	private ClientToolbar clientToolbar;
+
+	@Inject
+	private StarPanelTimer starPanelTimer;
+
+	private NavigationButton navButton;
+	private StarhuntPanel starhuntPanel;
+
 	// Stars that we've discovered locally
 	private final List<StarData> stars = new ArrayList<>();
 
@@ -75,9 +90,56 @@ public class StarhuntPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception
 	{
+		log.info("Starhunt plugin starting up");
+
+		// Connect to server first
 		socketManager.registerListener(this);
-		overlayManager.add(overlay);
 		connectToServer();
+
+		// Add overlay
+		overlayManager.add(overlay);
+		log.debug("Added overlay to manager");
+
+		// Create panel
+		starhuntPanel = new StarhuntPanel(this, config);
+		log.debug("Created StarhuntPanel instance");
+
+		// Load icon for navigation button
+		final BufferedImage icon = ImageUtil.loadImageResource(StarhuntPlugin.class, "/star_icon.png");
+		if (icon == null) {
+			log.warn("Could not load star icon resource");
+		}
+
+		// Create navigation button
+		navButton = NavigationButton.builder()
+				.tooltip("Star Hunt")
+				.icon(icon != null ? icon : ImageUtil.getResourceStreamFromClass(StarhuntPlugin.class, "star_icon.png"))
+				.priority(5)
+				.panel(starhuntPanel)
+				.build();
+		log.debug("Created navigation button");
+
+		// Add to toolbar
+		clientToolbar.addNavigation(navButton);
+		log.debug("Added navigation button to toolbar");
+
+		// Set the panel in the timer
+		if (starPanelTimer != null) {
+			starPanelTimer.setPanel(starhuntPanel);
+			log.debug("Set panel in timer");
+		} else {
+			log.warn("starPanelTimer is null, cannot set panel");
+		}
+
+		// Initial update with any existing stars
+		if (!networkStars.isEmpty()) {
+			log.debug("Performing initial panel update with {} existing stars", networkStars.size());
+			starhuntPanel.updateStars(networkStars);
+		} else {
+			log.debug("No existing stars for initial panel update");
+		}
+
+		log.info("Starhunt plugin started successfully");
 	}
 
 	@Override
@@ -86,6 +148,10 @@ public class StarhuntPlugin extends Plugin
 		socketManager.unregisterListener(this);
 		socketManager.disconnect();
 		overlayManager.remove(overlay);
+
+		// Remove navigation button
+		clientToolbar.removeNavigation(navButton);
+
 		stars.clear();
 		networkStars.clear();
 		connected = false;
@@ -145,11 +211,14 @@ public class StarhuntPlugin extends Plugin
 		connectToServer();
 	}
 
-	public void onStarDataReceived(StarData starData)
-	{
+	public void onStarDataReceived(StarData starData) {
+		log.debug("Received star data: W{} T{} at {}, active: {}",
+				starData.getWorld(), starData.getTier(), starData.getLocation(), starData.isActive());
+
 		// Handle incoming star data
 		clientThread.invokeLater(() -> {
 			if (client.getGameState() != GameState.LOGGED_IN) {
+				log.debug("Ignoring star data - client not logged in");
 				return;
 			}
 
@@ -160,6 +229,8 @@ public class StarhuntPlugin extends Plugin
 						existingStar.getWorldPoint().equals(starData.getWorldPoint())) {
 					// Update our existing star with new information
 					existingStar.update(starData);
+					log.debug("Updated existing star: W{} T{} at {}",
+							existingStar.getWorld(), existingStar.getTier(), existingStar.getLocation());
 					found = true;
 					break;
 				}
@@ -168,6 +239,8 @@ public class StarhuntPlugin extends Plugin
 			// Add new star if we're not tracking it yet
 			if (!found) {
 				networkStars.add(starData);
+				log.debug("Added new star to network stars list: W{} T{} at {}",
+						starData.getWorld(), starData.getTier(), starData.getLocation());
 
 				// Sort stars by last update time (newest first)
 				networkStars.sort(Comparator.comparing(StarData::getLastUpdate).reversed());
@@ -186,20 +259,31 @@ public class StarhuntPlugin extends Plugin
 
 			// If this is a star in our world, check if we need to update our local list
 			if (starData.getWorld() == client.getWorld()) {
+				boolean localFound = false;
 				for (StarData localStar : stars) {
 					if (localStar.getWorldPoint().equals(starData.getWorldPoint())) {
 						// We're already tracking this star locally
-						return;
+						localFound = true;
+						break;
 					}
 				}
 
-				// This is a star in our world that we're not tracking locally
-				// Only add it if it's active
-				if (starData.isActive()) {
-					// Create a new local star. We don't have the NPC or GameObject,
-					// but we can still show it's location
+				if (!localFound && starData.isActive()) {
+					// This is a star in our world that we're not tracking locally
 					stars.add(starData);
+					log.debug("Added star to local tracking list: W{} T{} at {}",
+							starData.getWorld(), starData.getTier(), starData.getLocation());
 				}
+			}
+
+			log.debug("Network stars list now contains {} stars", networkStars.size());
+
+			// Always update the panel when we receive any star data
+			if (starhuntPanel != null) {
+				log.debug("Updating panel with network stars");
+				starhuntPanel.updateStars(networkStars);
+			} else {
+				log.warn("Cannot update panel - starhuntPanel is null");
 			}
 		});
 	}
@@ -217,6 +301,39 @@ public class StarhuntPlugin extends Plugin
 
 			socketManager.sendStarData(star);
 		}
+	}
+
+	/**
+	 * Finds a star in the network stars list by world and location
+	 *
+	 * @param world The world to search for
+	 * @param worldPoint The world point to search for
+	 * @return The star if found, null otherwise
+	 */
+	public StarData findStar(int world, WorldPoint worldPoint) {
+		for (StarData star : networkStars) {
+			if (star.getWorld() == world && star.getWorldPoint().equals(worldPoint)) {
+				return star;
+			}
+		}
+		return null;
+	}
+
+// Also add a method to get all active stars
+
+	/**
+	 * Gets all active stars
+	 *
+	 * @return List of active stars
+	 */
+	public List<StarData> getActiveStars() {
+		List<StarData> activeStars = new ArrayList<>();
+		for (StarData star : networkStars) {
+			if (star.isActive()) {
+				activeStars.add(star);
+			}
+		}
+		return activeStars;
 	}
 
 	@Subscribe
@@ -326,6 +443,20 @@ public class StarhuntPlugin extends Plugin
 				boolean updated = star.update(client);
 				if (updated) {
 					sendStarData(star);
+
+					// Also update the UI if this star is in our network stars list
+					for (StarData networkStar : networkStars) {
+						if (networkStar.getWorld() == star.getWorld() &&
+								networkStar.getWorldPoint().equals(star.getWorldPoint())) {
+							// This is the same star, update its data
+							networkStar.update(star);
+							// Update the panel
+							if (starhuntPanel != null) {
+								starhuntPanel.updateStars(networkStars);
+							}
+							break;
+						}
+					}
 				}
 			}
 		}

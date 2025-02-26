@@ -57,6 +57,7 @@ public class StarhuntSocketManager {
         }
 
         isConnecting = true;
+        log.info("Connecting to WebSocket server: {}", serverUri);
 
         try {
             client = new WebSocketClient(serverUri) {
@@ -69,6 +70,7 @@ public class StarhuntSocketManager {
 
                 @Override
                 public void onMessage(String message) {
+                    log.debug("Received WebSocket message: {}", message);
                     handleMessage(message);
                 }
 
@@ -110,6 +112,7 @@ public class StarhuntSocketManager {
 
     public void sendStarData(StarData star) {
         if (client == null || !client.isOpen()) {
+            log.warn("Cannot send star data: WebSocket not connected");
             return;
         }
 
@@ -120,6 +123,7 @@ public class StarhuntSocketManager {
             payload.setData(star);
 
             String message = gson.toJson(payload);
+            log.debug("Sending star data: {}", message);
             client.send(message);
         } catch (Exception e) {
             log.error("Failed to send star data", e);
@@ -131,40 +135,53 @@ public class StarhuntSocketManager {
             MessagePayload payload = gson.fromJson(message, MessagePayload.class);
 
             if (payload.getType() == MessageType.STAR_UPDATE) {
+                log.debug("Received STAR_UPDATE message");
                 StarData star = gson.fromJson(gson.toJson(payload.getData()), StarData.class);
+                log.debug("Parsed star data: W{} T{} at {}", star.getWorld(), star.getTier(), star.getLocation());
                 notifyListenersWithStar(star);
+            } else {
+                log.debug("Received message with type: {}", payload.getType());
             }
         } catch (Exception e) {
-            log.error("Failed to parse message", e);
+            log.error("Failed to parse message: {}", message, e);
         }
     }
 
     public void registerListener(Object listener) {
         if (!listeners.contains(listener)) {
             listeners.add(listener);
+            log.debug("Registered listener: {}", listener.getClass().getSimpleName());
         }
     }
 
     public void unregisterListener(Object listener) {
         listeners.remove(listener);
+        log.debug("Unregistered listener: {}", listener.getClass().getSimpleName());
     }
 
     private void notifyListeners(String methodName) {
+        log.debug("Notifying {} listeners with method: {}", listeners.size(), methodName);
         for (Object listener : listeners) {
             try {
                 listener.getClass().getMethod(methodName).invoke(listener);
             } catch (Exception e) {
-                log.error("Failed to notify listener", e);
+                log.error("Failed to notify listener {} with method {}",
+                        listener.getClass().getSimpleName(), methodName, e);
             }
         }
     }
 
     private void notifyListenersWithStar(StarData star) {
+        log.debug("Notifying {} listeners with star data: W{} T{} at {}",
+                listeners.size(), star.getWorld(), star.getTier(), star.getLocation());
+
         for (Object listener : listeners) {
             try {
                 listener.getClass().getMethod("onStarDataReceived", StarData.class).invoke(listener, star);
+                log.debug("Successfully notified listener: {}", listener.getClass().getSimpleName());
             } catch (Exception e) {
-                log.error("Failed to notify listener with star data", e);
+                log.error("Failed to notify listener {} with star data",
+                        listener.getClass().getSimpleName(), e);
             }
         }
     }
