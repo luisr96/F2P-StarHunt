@@ -49,6 +49,7 @@ public class StarhuntPlugin extends Plugin
 	private static final int RECONNECT_DELAY_MS = 5000;
 
 	@Inject
+	@Getter
 	private Client client;
 
 	@Inject
@@ -77,6 +78,7 @@ public class StarhuntPlugin extends Plugin
 	private StarhuntPanel starhuntPanel;
 
 	// Stars that we've discovered locally
+	@Getter
 	private final List<StarData> stars = new ArrayList<>();
 
 	// Stars received from the network

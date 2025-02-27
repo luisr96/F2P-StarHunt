@@ -138,9 +138,22 @@ public class StarData {
             changed = true;
         }
 
-        // Update health
+        // Always force update health for active stars
         int newHealth = getHealth();
-        if (health != newHealth && newHealth >= 0) {
+        if (active && newHealth >= 0) {
+            // For active stars, always consider health updates as changes
+            if (health != newHealth) {
+                health = newHealth;
+                changed = true;
+            } else {
+                // Even if the health value is the same, we should periodically update
+                // to make sure the UI stays fresh
+                long timeSinceLastUpdate = Instant.now().toEpochMilli() - lastUpdate.toEpochMilli();
+                if (timeSinceLastUpdate > 2000) { // Update at least every 2 seconds
+                    changed = true;
+                }
+            }
+        } else if (health != newHealth && newHealth >= 0) {
             health = newHealth;
             changed = true;
         }
