@@ -22,6 +22,8 @@ import net.runelite.client.task.Schedule;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
+
+import java.awt.*;
 import java.awt.image.BufferedImage;
 
 import java.net.URI;
@@ -90,6 +92,26 @@ public class StarhuntPlugin extends Plugin
 		return configManager.getConfig(StarhuntConfig.class);
 	}
 
+	private BufferedImage createStarIcon() {
+		// Create a simple star icon
+		BufferedImage image = new BufferedImage(24, 24, BufferedImage.TYPE_INT_ARGB);
+		Graphics2D g2d = image.createGraphics();
+		g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+		// Draw a star shape
+		g2d.setColor(new Color(255, 215, 0)); // Gold color
+		int[] xPoints = {12, 15, 21, 16, 18, 12, 6, 8, 3, 9};
+		int[] yPoints = {2, 8, 8, 12, 18, 15, 18, 12, 8, 8};
+		g2d.fillPolygon(xPoints, yPoints, 10);
+
+		// Add a simple outline
+		g2d.setColor(new Color(218, 165, 32)); // Darker gold
+		g2d.drawPolygon(xPoints, yPoints, 10);
+
+		g2d.dispose();
+		return image;
+	}
+
 	@Override
 	protected void startUp() throws Exception
 	{
@@ -107,16 +129,22 @@ public class StarhuntPlugin extends Plugin
 		starhuntPanel = new StarhuntPanel(this, config);
 		log.debug("Created StarhuntPanel instance");
 
-		// Load icon for navigation button
-		final BufferedImage icon = ImageUtil.loadImageResource(StarhuntPlugin.class, "/star_icon.png");
-		if (icon == null) {
-			log.warn("Could not load star icon resource");
+		// Create a star-shaped icon programmatically
+		BufferedImage icon;
+		try {
+			// First try to load the custom icon from resources
+			icon = ImageUtil.loadImageResource(getClass(), "/star_icon.png");
+			log.debug("Loaded custom star icon from resources");
+		} catch (Exception e) {
+			// If that fails, create one programmatically
+			log.debug("Could not load star icon resource, creating one programmatically");
+			icon = createStarIcon();
 		}
 
 		// Create navigation button
 		navButton = NavigationButton.builder()
 				.tooltip("Star Hunt")
-				.icon(icon != null ? icon : ImageUtil.getResourceStreamFromClass(StarhuntPlugin.class, "star_icon.png"))
+				.icon(icon)
 				.priority(5)
 				.panel(starhuntPanel)
 				.build();
@@ -125,6 +153,7 @@ public class StarhuntPlugin extends Plugin
 		// Add to toolbar
 		clientToolbar.addNavigation(navButton);
 		log.debug("Added navigation button to toolbar");
+
 
 		// Set the panel in the timer
 		if (starPanelTimer != null) {

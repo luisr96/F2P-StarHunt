@@ -18,23 +18,72 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+
 @Slf4j
 public class StarhuntPanel extends PluginPanel {
 
-    private static final ImageIcon STAR_ICON;
-    private static final ImageIcon STAR_MINERS_ICON;
-    private static final ImageIcon STAR_HEALTH_ICON;
+    // Create simple programmatically-generated icons instead of loading resources
+    private static final ImageIcon STAR_ICON = createStarIcon();
+    private static final ImageIcon MINERS_ICON = createMinersIcon();
+    private static final ImageIcon HEALTH_ICON = createHealthIcon();
 
-    static {
-        final BufferedImage starIcon = ImageUtil.loadImageResource(StarhuntPanel.class, "/star_icon.png");
-        STAR_ICON = new ImageIcon(starIcon);
+    // Create a simple star icon programmatically
+    private static ImageIcon createStarIcon() {
+        BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = image.createGraphics();
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        // Use placeholders for now, replace with actual icons later
-        final BufferedImage minersIcon = ImageUtil.loadImageResource(StarhuntPanel.class, "/miners_icon.png");
-        STAR_MINERS_ICON = minersIcon != null ? new ImageIcon(minersIcon) : STAR_ICON;
+        // Draw a simple star shape
+        g2d.setColor(Color.YELLOW);
+        int[] xPoints = {8, 10, 14, 11, 12, 8, 4, 5, 2, 6};
+        int[] yPoints = {1, 5, 5, 8, 12, 10, 12, 8, 5, 5};
+        g2d.fillPolygon(xPoints, yPoints, 10);
 
-        final BufferedImage healthIcon = ImageUtil.loadImageResource(StarhuntPanel.class, "/health_icon.png");
-        STAR_HEALTH_ICON = healthIcon != null ? new ImageIcon(healthIcon) : STAR_ICON;
+        g2d.dispose();
+        return new ImageIcon(image);
+    }
+
+    // Create a simple miners (person) icon
+    private static ImageIcon createMinersIcon() {
+        BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = image.createGraphics();
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        // Draw a simple person shape
+        g2d.setColor(Color.WHITE);
+        // Head
+        g2d.fillOval(6, 2, 5, 5);
+        // Body
+        g2d.fillRect(7, 7, 3, 5);
+        // Arms
+        g2d.drawLine(7, 9, 4, 7);
+        g2d.drawLine(10, 9, 13, 7);
+        // Legs
+        g2d.drawLine(7, 12, 5, 15);
+        g2d.drawLine(10, 12, 12, 15);
+
+        g2d.dispose();
+        return new ImageIcon(image);
+    }
+
+    // Create a simple health (heart) icon
+    private static ImageIcon createHealthIcon() {
+        BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = image.createGraphics();
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        // Draw a simple heart shape
+        g2d.setColor(Color.RED);
+        g2d.fillArc(3, 3, 5, 5, 0, 180);
+        g2d.fillArc(8, 3, 5, 5, 0, 180);
+        g2d.fillPolygon(
+                new int[]{3, 8, 13, 8},
+                new int[]{5, 12, 5, 5},
+                4
+        );
+
+        g2d.dispose();
+        return new ImageIcon(image);
     }
 
     private final StarhuntPlugin plugin;
@@ -85,9 +134,6 @@ public class StarhuntPanel extends PluginPanel {
     }
 
     public void updateStars(List<StarData> stars) {
-        // Ensure we add the Slf4j annotation to the class
-        // @Slf4j should be at the top of the StarhuntPanel class
-
         log.debug("Updating panel with {} stars", stars.size());
 
         starsContainer.removeAll();
@@ -180,16 +226,18 @@ public class StarhuntPanel extends PluginPanel {
             detailsPanel.setBorder(new EmptyBorder(5, 0, 5, 0));
             detailsPanel.setOpaque(false);
 
+            // Add star icon to location
+            locationLabel.setIcon(STAR_ICON);
             locationLabel.setText(star.getLocation());
             locationLabel.setForeground(Color.WHITE);
             locationLabel.setFont(FontManager.getRunescapeSmallFont());
 
-            minersLabel.setIcon(STAR_MINERS_ICON);
+            minersLabel.setIcon(MINERS_ICON);
             minersLabel.setText("Miners: " + star.getMiners());
             minersLabel.setForeground(Color.WHITE);
             minersLabel.setFont(FontManager.getRunescapeSmallFont());
 
-            healthLabel.setIcon(STAR_HEALTH_ICON);
+            healthLabel.setIcon(HEALTH_ICON);
             int health = star.getHealth() >= 0 ? star.getHealth() : 0;
             healthLabel.setText("Health: " + health + "%");
             healthLabel.setForeground(getHealthColor(health));
