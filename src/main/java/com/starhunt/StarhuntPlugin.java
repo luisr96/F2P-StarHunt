@@ -17,6 +17,7 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.task.Schedule;
 
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -25,8 +26,10 @@ import java.awt.image.BufferedImage;
 
 import java.net.URI;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import lombok.Getter;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -396,7 +399,23 @@ public class StarhuntPlugin extends Plugin
 			if (star.getWorldPoint().equals(worldPoint)) {
 				star.setObject(obj);
 				star.resetHealth();
+				// Make sure to set the star as active since a new tier has spawned
+				star.setActive(true);
 				sendStarData(star);
+
+				// Also update the star in our network stars list if it exists
+				for (StarData networkStar : networkStars) {
+					if (networkStar.getWorld() == star.getWorld() &&
+							networkStar.getWorldPoint().equals(star.getWorldPoint())) {
+						networkStar.update(star);
+						// Update the panel
+						if (starhuntPanel != null) {
+							starhuntPanel.updateStars(networkStars);
+						}
+						break;
+					}
+				}
+
 				return;
 			}
 		}
@@ -421,13 +440,41 @@ public class StarhuntPlugin extends Plugin
 		for (StarData star : stars) {
 			if (star.getWorldPoint().equals(worldPoint)) {
 				star.setObject(null);
-				// We'll keep it in our list in case it respawns but mark it as inactive
-				star.setActive(false);
+
+				// If it's tier 1, it's likely depleted completely, otherwise it's changing tiers
+				boolean isTier1 = tier == 1;
+
+				// Mark as inactive if it's tier 1 (likely depleted)
+				star.setActive(!isTier1);
+
+				// Send update to server
 				sendStarData(star);
+
+				// If this is a tier 1 star (depleted), immediately update our network stars list
+				if (isTier1) {
+					for (StarData networkStar : networkStars) {
+						if (networkStar.getWorld() == star.getWorld() &&
+								networkStar.getWorldPoint().equals(star.getWorldPoint())) {
+							networkStar.setActive(false);
+							networkStar.setLastUpdate(Instant.now());
+
+							// Update the panel immediately
+							if (starhuntPanel != null) {
+								clientThread.invokeLater(() -> {
+									starhuntPanel.updateStars(networkStars);
+								});
+							}
+
+							break;
+						}
+					}
+				}
+
 				return;
 			}
 		}
 	}
+
 
 	@Subscribe
 	public void onGameTick(GameTick tick)
@@ -482,6 +529,38 @@ public class StarhuntPlugin extends Plugin
 			connected = false;
 			reconnectAttempts = 0;
 			connectToServer();
+		}
+	}
+
+	@Schedule(
+			period = 5,
+			unit = ChronoUnit.SECONDS
+	)
+	public void cleanupStars() {
+		// Clean up depleted tier 1 stars that have been inactive for some time
+		boolean needsUpdate = false;
+		long currentTime = Instant.now().toEpochMilli();
+
+		// Check if we need to clean up any network stars
+		Iterator<StarData> iterator = networkStars.iterator();
+		while (iterator.hasNext()) {
+			StarData star = iterator.next();
+
+			// If a star has been inactive for more than 60 seconds, remove it
+			if (!star.isActive()) {
+				long inactiveTime = currentTime - star.getLastUpdate().toEpochMilli();
+				if (inactiveTime > 60000) { // 60 seconds
+					log.debug("Removing inactive star from network stars: W{} T{} at {}",
+							star.getWorld(), star.getTier(), star.getLocation());
+					iterator.remove();
+					needsUpdate = true;
+				}
+			}
+		}
+
+		// If we removed any stars, update the panel
+		if (needsUpdate && starhuntPanel != null) {
+			starhuntPanel.updateStars(networkStars);
 		}
 	}
 }

@@ -164,7 +164,12 @@ public class StarData {
      * @param other The other star data
      */
     public void update(StarData other) {
-        if (other.getTier() > 0) {
+        // If the other star has a newer tier, make sure we keep the active status
+        if (other.getTier() > 0 && other.getTier() != this.tier) {
+            this.tier = other.getTier();
+            // If we're getting a new tier, the star should be active
+            this.active = true;
+        } else if (other.getTier() > 0) {
             this.tier = other.getTier();
         }
 
@@ -180,7 +185,12 @@ public class StarData {
             this.tierTicksEstimate = Arrays.copyOf(other.getTierTicksEstimate(), other.getTierTicksEstimate().length);
         }
 
-        this.active = other.isActive();
+        // Only use the other star's active status if we're not dealing with a tier change
+        // or if we're explicitly activating the star
+        if (other.isActive()) {
+            this.active = true;
+        }
+
         this.lastUpdate = other.getLastUpdate();
 
         if (other.getDiscoveredBy() != null) {
