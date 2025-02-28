@@ -31,8 +31,10 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import lombok.Getter;
 import net.runelite.client.ui.overlay.OverlayManager;
 
@@ -67,7 +69,6 @@ public class StarhuntPlugin extends Plugin
 	@Inject
 	private OverlayManager overlayManager;
 
-	// Add these fields to StarhuntPlugin class
 	@Inject
 	private ClientToolbar clientToolbar;
 
@@ -84,6 +85,9 @@ public class StarhuntPlugin extends Plugin
 	// Stars received from the network
 	@Getter
 	private final List<StarData> networkStars = new ArrayList<>();
+
+	// Track when we last sent updates for each star
+	private final Map<String, Long> lastStarUpdateTimes = new HashMap<>();
 
 	private int reconnectAttempts = 0;
 	private boolean connected = false;
@@ -188,6 +192,7 @@ public class StarhuntPlugin extends Plugin
 
 		stars.clear();
 		networkStars.clear();
+		lastStarUpdateTimes.clear();
 		connected = false;
 		reconnectAttempts = 0;
 	}
@@ -353,8 +358,6 @@ public class StarhuntPlugin extends Plugin
 		return null;
 	}
 
-// Also add a method to get all active stars
-
 	/**
 	 * Gets all active stars
 	 *
@@ -506,7 +509,6 @@ public class StarhuntPlugin extends Plugin
 		}
 	}
 
-
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
@@ -514,28 +516,77 @@ public class StarhuntPlugin extends Plugin
 			return;
 		}
 
-		// Update our nearby stars and send updates
+		long currentTime = System.currentTimeMillis();
+		int baseUpdateFrequencyMs = config.updateFrequency() * 1000;
+
 		for (StarData star : stars) {
 			if (star.isNearby(client.getLocalPlayer().getWorldLocation(), config.maxUpdateDistance())) {
-				// Only update stars that are nearby to avoid unnecessary updates
-				boolean updated = star.update(client);
-				if (updated) {
-					sendStarData(star);
+				String starId = star.getWorld() + "_" + star.getWorldPoint().getX() + "_" + star.getWorldPoint().getY();
+				Long lastUpdate = lastStarUpdateTimes.getOrDefault(starId, 0L);
 
-					// Also update the UI if this star is in our network stars list
-					for (StarData networkStar : networkStars) {
-						if (networkStar.getWorld() == star.getWorld() &&
-								networkStar.getWorldPoint().equals(star.getWorldPoint())) {
-							// This is the same star, update its data
-							networkStar.update(star);
-							// Update the panel
-							if (starhuntPanel != null) {
-								starhuntPanel.updateStars(networkStars);
-							}
-							break;
-						}
+				// Determine if we should update based on time elapsed and jitter
+				boolean shouldUpdate = false;
+
+				// Calculate jitter once per star and reuse it
+				double jitterFactor = 0.8 + (Math.random() * 0.4); // 0.8 to 1.2
+				int actualUpdateFrequency = (int)(baseUpdateFrequencyMs * jitterFactor);
+
+				// Check if it's time for a regular update
+				if (currentTime - lastUpdate >= actualUpdateFrequency) {
+					shouldUpdate = true;
+				}
+
+				// Check for critical state changes that might warrant an immediate update
+				boolean tierChanged = checkTierChanged(star);
+				boolean existenceChanged = checkExistenceChanged(star);
+
+				if (tierChanged || existenceChanged) {
+					// For critical changes, update with a minimum interval of 1 second
+					// to prevent spamming during transitions
+					if (currentTime - lastUpdate >= 1000) {
+						shouldUpdate = true;
 					}
 				}
+
+				if (shouldUpdate) {
+					boolean updated = star.update(client);
+					if (updated) {
+						sendStarData(star);
+						lastStarUpdateTimes.put(starId, currentTime);
+
+						// Update in network stars
+						updateNetworkStar(star);
+					}
+				}
+			}
+		}
+	}
+
+	private boolean checkTierChanged(StarData star) {
+		// Logic to detect if tier has changed
+		int currentTier = -1;
+		if (star.getObject() != null) {
+			currentTier = StarData.getTier(star.getObject().getId());
+		}
+		return currentTier > 0 && currentTier != star.getTier();
+	}
+
+	private boolean checkExistenceChanged(StarData star) {
+		// Logic to detect if star has appeared/disappeared
+		boolean wasActive = star.isActive();
+		boolean isActive = star.getObject() != null || star.getNpc() != null;
+		return wasActive != isActive;
+	}
+
+	private void updateNetworkStar(StarData star) {
+		for (StarData networkStar : networkStars) {
+			if (networkStar.getWorld() == star.getWorld() &&
+					networkStar.getWorldPoint().equals(star.getWorldPoint())) {
+				networkStar.update(star);
+				if (starhuntPanel != null) {
+					starhuntPanel.updateStars(networkStars);
+				}
+				break;
 			}
 		}
 	}
