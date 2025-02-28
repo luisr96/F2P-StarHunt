@@ -44,16 +44,21 @@ public class StarhuntSocketManager {
                 .create();
     }
 
-    public void connect(URI serverUri) {
+    /**
+     * Connect to WebSocket server
+     * @param serverUri URI of the WebSocket server
+     * @return boolean indicating whether connection was initiated (not necessarily successful)
+     */
+    public boolean connect(URI serverUri) {
         // Check if we're already connected or connecting
         if (client != null && client.isOpen()) {
             log.info("Already connected to a websocket server");
-            return;
+            return true;
         }
 
         if (isConnecting) {
             log.info("Already attempting to connect to a websocket server");
-            return;
+            return false;
         }
 
         isConnecting = true;
@@ -95,12 +100,18 @@ public class StarhuntSocketManager {
                 }
             }, 30, 30, TimeUnit.SECONDS);
 
-            client.connect();
+            // Connect asynchronously to prevent blocking the main thread
+            client.connectBlocking(2, TimeUnit.SECONDS);
+            return true;
         } catch (Exception e) {
             log.error("Failed to initialize WebSocket connection", e);
             isConnecting = false;
-            throw e;
+            return false;
         }
+    }
+
+    public boolean isConnected() {
+        return client != null && client.isOpen();
     }
 
     public void disconnect() {
@@ -112,7 +123,7 @@ public class StarhuntSocketManager {
 
     public void sendStarData(StarData star) {
         if (client == null || !client.isOpen()) {
-            log.warn("Cannot send star data: WebSocket not connected");
+            log.debug("Cannot send star data: WebSocket not connected");
             return;
         }
 

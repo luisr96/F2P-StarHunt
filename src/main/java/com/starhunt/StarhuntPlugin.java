@@ -4,6 +4,7 @@ import com.google.inject.Provides;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
+import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameObjectDespawned;
 import net.runelite.api.events.GameObjectSpawned;
@@ -27,6 +28,7 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -35,6 +37,10 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
 import lombok.Getter;
 import net.runelite.client.ui.overlay.OverlayManager;
 
@@ -74,6 +80,9 @@ public class StarhuntPlugin extends Plugin
 
 	@Inject
 	private StarPanelTimer starPanelTimer;
+
+	@Inject
+	private ScheduledExecutorService executor;
 
 	private NavigationButton navButton;
 	private StarhuntPanel starhuntPanel;
@@ -123,17 +132,17 @@ public class StarhuntPlugin extends Plugin
 	{
 		log.info("Starhunt plugin starting up");
 
-		// Connect to server first
-		socketManager.registerListener(this);
-		connectToServer();
-
 		// Add overlay
 		overlayManager.add(overlay);
 		log.debug("Added overlay to manager");
 
-		// Create panel
+		// Create panel first so we can update it with connection status
 		starhuntPanel = new StarhuntPanel(this, config);
 		log.debug("Created StarhuntPanel instance");
+
+		// Try to connect to server, but don't block startup
+		socketManager.registerListener(this);
+		safeConnectToServer();
 
 		// Create a star-shaped icon programmatically
 		BufferedImage icon;
@@ -160,7 +169,6 @@ public class StarhuntPlugin extends Plugin
 		clientToolbar.addNavigation(navButton);
 		log.debug("Added navigation button to toolbar");
 
-
 		// Set the panel in the timer
 		if (starPanelTimer != null) {
 			starPanelTimer.setPanel(starhuntPanel);
@@ -176,6 +184,9 @@ public class StarhuntPlugin extends Plugin
 		} else {
 			log.debug("No existing stars for initial panel update");
 		}
+
+		// Update connection status in panel
+		updateConnectionStatus();
 
 		log.info("Starhunt plugin started successfully");
 	}
@@ -197,39 +208,56 @@ public class StarhuntPlugin extends Plugin
 		reconnectAttempts = 0;
 	}
 
-	private void connectToServer()
-	{
-		if (config.websocketUrl().isEmpty())
-		{
+	/**
+	 * Safely attempt to connect to server without blocking or crashing
+	 */
+	private void safeConnectToServer() {
+		if (config.websocketUrl().isEmpty()) {
 			log.warn("Websocket URL is not configured, star data will not be shared");
+			connected = false;
+			updateConnectionStatus();
 			return;
 		}
 
-		try
-		{
-			socketManager.connect(new URI(config.websocketUrl()));
-			connected = true;
-			reconnectAttempts = 0;
-		}
-		catch (Exception e)
-		{
-			log.error("Failed to connect to websocket server", e);
-			if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS)
-			{
-				reconnectAttempts++;
-				log.info("Attempting to reconnect ({}/{})", reconnectAttempts, MAX_RECONNECT_ATTEMPTS);
-				new Thread(() -> {
-					try
-					{
-						Thread.sleep(RECONNECT_DELAY_MS);
-						connectToServer();
-					}
-					catch (InterruptedException ie)
-					{
-						Thread.currentThread().interrupt();
-					}
-				}).start();
+		// Use an executor to prevent blocking the main thread
+		executor.submit(() -> {
+			try {
+				boolean result = socketManager.connect(new URI(config.websocketUrl()));
+				if (result) {
+					// Connection attempt started, but may not be successful yet
+					// The actual connection status will be updated in onWebsocketConnected/Disconnected
+					log.debug("WebSocket connection attempt started");
+				} else {
+					log.warn("Could not initiate WebSocket connection");
+					connected = false;
+					updateConnectionStatus();
+				}
+			} catch (URISyntaxException e) {
+				log.error("Invalid WebSocket URL", e);
+				connected = false;
+				updateConnectionStatus();
 			}
+		});
+	}
+
+	/**
+	 * Try to reconnect to the server
+	 */
+	public void reconnectToServer() {
+		if (!connected) {
+			reconnectAttempts = 0; // Reset attempts on manual reconnect
+			safeConnectToServer();
+		}
+	}
+
+	/**
+	 * Update the connection status in the UI
+	 */
+	private void updateConnectionStatus() {
+		if (starhuntPanel != null) {
+			clientThread.invokeLater(() -> {
+				starhuntPanel.updateConnectionStatus(connected);
+			});
 		}
 	}
 
@@ -237,6 +265,9 @@ public class StarhuntPlugin extends Plugin
 	{
 		log.info("Connected to Starhunt server");
 		connected = true;
+		reconnectAttempts = 0;
+		updateConnectionStatus();
+
 		// Send any existing stars we have
 		for (StarData star : stars) {
 			sendStarData(star);
@@ -247,7 +278,17 @@ public class StarhuntPlugin extends Plugin
 	{
 		log.info("Disconnected from Starhunt server");
 		connected = false;
-		connectToServer();
+		updateConnectionStatus();
+
+		// Schedule a reconnection attempt with exponential backoff
+		if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+			reconnectAttempts++;
+			int delay = RECONNECT_DELAY_MS * reconnectAttempts;
+			log.info("Scheduling reconnection attempt {}/{} in {} ms",
+					reconnectAttempts, MAX_RECONNECT_ATTEMPTS, delay);
+
+			executor.schedule(this::safeConnectToServer, delay, TimeUnit.MILLISECONDS);
+		}
 	}
 
 	public void onStarDataReceived(StarData starData) {
@@ -387,6 +428,7 @@ public class StarhuntPlugin extends Plugin
 		for (StarData star : stars) {
 			if (star.getWorldPoint().equals(worldPoint)) {
 				star.setNpc(npc);
+				star.setActive(true); // Ensure star is marked as active
 				sendStarData(star);
 				return;
 			}
@@ -405,16 +447,7 @@ public class StarhuntPlugin extends Plugin
 			return;
 		}
 
-		WorldPoint worldPoint = event.getNpc().getWorldLocation();
-
-		// Find the star and update it
-		for (StarData star : stars) {
-			if (star.getWorldPoint().equals(worldPoint)) {
-				star.setNpc(null);
-				sendStarData(star);
-				return;
-			}
-		}
+		// We don't need to do anything special here as verifyLocalStars will handle the status
 	}
 
 	@Subscribe
@@ -433,23 +466,11 @@ public class StarhuntPlugin extends Plugin
 			if (star.getWorldPoint().equals(worldPoint)) {
 				star.setObject(obj);
 				star.resetHealth();
+				star.setTier(tier);
 				// Make sure to set the star as active since a new tier has spawned
 				star.setActive(true);
 				sendStarData(star);
-
-				// Also update the star in our network stars list if it exists
-				for (StarData networkStar : networkStars) {
-					if (networkStar.getWorld() == star.getWorld() &&
-							networkStar.getWorldPoint().equals(star.getWorldPoint())) {
-						networkStar.update(star);
-						// Update the panel
-						if (starhuntPanel != null) {
-							starhuntPanel.updateStars(networkStars);
-						}
-						break;
-					}
-				}
-
+				updateNetworkStar(star);
 				return;
 			}
 		}
@@ -468,50 +489,205 @@ public class StarhuntPlugin extends Plugin
 			return;
 		}
 
-		WorldPoint worldPoint = event.getGameObject().getWorldLocation();
+		// We don't need to do anything special here as verifyLocalStars will handle the status
+	}
 
-		// Find the star and update/remove it
+	/**
+	 * Direct star verification method - called from onGameTick
+	 * Checks if stars actually exist by looking for their object IDs
+	 */
+	/**
+	 * Direct star verification method - called from onGameTick
+	 * Checks if stars actually exist by looking for their object IDs
+	 */
+	private void verifyLocalStars() {
+		// Only check when logged in
+		if (client.getGameState() != GameState.LOGGED_IN) {
+			return;
+		}
+
+		// Create a list of stars to remove
+		List<StarData> starsToRemove = new ArrayList<>();
+		boolean needsNetworkUpdate = false;
+
+		// Check each star in our local tracking list
 		for (StarData star : stars) {
-			if (star.getWorldPoint().equals(worldPoint)) {
-				star.setObject(null);
+			// Get world point for this star
+			WorldPoint worldPoint = star.getWorldPoint();
 
-				// If it's tier 1, it's likely depleted completely, otherwise it's changing tiers
-				boolean isTier1 = tier == 1;
+			// Convert to local point to check if it's in the scene
+			LocalPoint localPoint = LocalPoint.fromWorld(client, worldPoint);
 
-				// Mark as inactive if it's tier 1 (likely depleted)
-				star.setActive(!isTier1);
+			// Check if this point is within the currently loaded scene
+			if (localPoint != null && localPoint.isInScene()) {
+				// Check for star objects at this location
+				Tile[][][] tiles = client.getScene().getTiles();
+				int plane = worldPoint.getPlane();
 
-				// Send update to server
-				sendStarData(star);
+				// Calculate scene coordinates
+				int sceneX = localPoint.getSceneX();
+				int sceneY = localPoint.getSceneY();
 
-				// If this is a tier 1 star (depleted), immediately update our network stars list
-				if (isTier1) {
-					for (StarData networkStar : networkStars) {
-						if (networkStar.getWorld() == star.getWorld() &&
-								networkStar.getWorldPoint().equals(star.getWorldPoint())) {
-							networkStar.setActive(false);
-							networkStar.setLastUpdate(Instant.now());
+				// Verify coordinates are within bounds
+				if (sceneX >= 0 && sceneY >= 0 && sceneX < Constants.SCENE_SIZE && sceneY < Constants.SCENE_SIZE) {
+					Tile tile = tiles[plane][sceneX][sceneY];
 
-							// Update the panel immediately
-							if (starhuntPanel != null) {
-								clientThread.invokeLater(() -> {
-									starhuntPanel.updateStars(networkStars);
-								});
+					// Skip if tile is null
+					if (tile == null) {
+						continue;
+					}
+
+					// Check for star game objects on this tile
+					boolean starFound = false;
+					if (tile.getGameObjects() != null) {
+						for (GameObject obj : tile.getGameObjects()) {
+							// Skip if null
+							if (obj == null) {
+								continue;
 							}
 
-							break;
+							// Check if this is a star object
+							int tier = StarData.getTier(obj.getId());
+							if (tier > 0) {
+								// Star found!
+								starFound = true;
+
+								// Update the star data if needed
+								if (!star.isActive() || star.getTier() != tier) {
+									log.debug("Updating star at {} to tier {} (was {})",
+											worldPoint, tier, star.getTier());
+									star.setTier(tier);
+									star.setObject(obj);
+									star.setActive(true);
+									star.resetHealth();
+									sendStarData(star);
+									updateNetworkStar(star);
+								}
+								break;
+							}
+						}
+					}
+
+					// If no star game object was found, check for the NPC
+					if (!starFound) {
+						List<NPC> npcsAtTile = client.getNpcs().stream()
+								.filter(npc -> npc.getId() == NPC_ID && npc.getWorldLocation().equals(worldPoint))
+								.collect(Collectors.toList());
+
+						if (!npcsAtTile.isEmpty()) {
+							// Star NPC found
+							starFound = true;
+
+							// Update the star data if needed
+							if (!star.isActive() || star.getNpc() == null) {
+								log.debug("Found star NPC at {}", worldPoint);
+								star.setNpc(npcsAtTile.get(0));
+								star.setActive(true);
+								sendStarData(star);
+								updateNetworkStar(star);
+							}
+						}
+					}
+
+					// If no star found at all but it's marked active, mark it inactive
+					if (!starFound && star.isActive()) {
+						log.debug("Star at {} no longer exists in game world - marking inactive", worldPoint);
+						star.setActive(false);
+						star.setObject(null);
+						star.setNpc(null);
+						sendStarData(star);
+						updateNetworkStar(star);
+
+						// Mark for removal from local tracking after some time
+						if (star.getLastUpdate() != null) {
+							long inactiveTime = Instant.now().toEpochMilli() - star.getLastUpdate().toEpochMilli();
+							if (inactiveTime > 60000) { // 60 seconds
+								starsToRemove.add(star);
+							}
 						}
 					}
 				}
-
-				return;
+			} else {
+				// Star is outside loaded scene - we can't verify it directly
+				// We'll just keep it as is unless it's been inactive for a while
+				if (!star.isActive() && star.getLastUpdate() != null) {
+					long inactiveTime = Instant.now().toEpochMilli() - star.getLastUpdate().toEpochMilli();
+					if (inactiveTime > 60000) { // 60 seconds of inactivity
+						starsToRemove.add(star);
+					}
+				}
 			}
+		}
+
+		// Remove stars marked for removal from local tracking
+		if (!starsToRemove.isEmpty()) {
+			stars.removeAll(starsToRemove);
+		}
+
+		// Also verify network stars in the current world
+		int currentWorld = client.getWorld();
+
+		for (StarData networkStar : networkStars) {
+			// Only check stars in our current world
+			if (networkStar.getWorld() == currentWorld && networkStar.isActive()) {
+				WorldPoint worldPoint = networkStar.getWorldPoint();
+				LocalPoint localPoint = LocalPoint.fromWorld(client, worldPoint);
+
+				// If point is in the scene, verify if star exists
+				if (localPoint != null && localPoint.isInScene()) {
+					boolean starExists = false;
+
+					// Calculate scene coordinates
+					int sceneX = localPoint.getSceneX();
+					int sceneY = localPoint.getSceneY();
+					int plane = worldPoint.getPlane();
+
+					// Verify coordinates are within bounds
+					if (sceneX >= 0 && sceneY >= 0 && sceneX < Constants.SCENE_SIZE && sceneY < Constants.SCENE_SIZE) {
+						// Check the tile for star objects
+						Tile tile = client.getScene().getTiles()[plane][sceneX][sceneY];
+						if (tile != null && tile.getGameObjects() != null) {
+							for (GameObject obj : tile.getGameObjects()) {
+								if (obj != null && StarData.getTier(obj.getId()) > 0) {
+									starExists = true;
+									break;
+								}
+							}
+						}
+
+						// Check for NPCs
+						if (!starExists) {
+							starExists = client.getNpcs().stream()
+									.anyMatch(npc -> npc.getId() == NPC_ID && npc.getWorldLocation().equals(worldPoint));
+						}
+
+						// Update if status doesn't match reality
+						if (!starExists && networkStar.isActive()) {
+							log.debug("Network star at {} doesn't exist in game world - marking inactive", worldPoint);
+							networkStar.setActive(false);
+							networkStar.setLastUpdate(Instant.now());
+							needsNetworkUpdate = true;
+						}
+					}
+				}
+			}
+		}
+
+		// Update the panel if any network stars were modified
+		if (needsNetworkUpdate && starhuntPanel != null) {
+			clientThread.invokeLater(() -> {
+				starhuntPanel.updateStars(networkStars);
+			});
 		}
 	}
 
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
+		// Run the direct star verification method
+		verifyLocalStars();
+
+		// Skip update logic if not connected or no stars to update
 		if (!connected || !config.shareStarData() || stars.isEmpty()) {
 			return;
 		}
@@ -520,14 +696,14 @@ public class StarhuntPlugin extends Plugin
 		int baseUpdateFrequencyMs = config.updateFrequency() * 1000;
 
 		for (StarData star : stars) {
-			if (star.isNearby(client.getLocalPlayer().getWorldLocation(), config.maxUpdateDistance())) {
+			if (star.isActive() && star.isNearby(client.getLocalPlayer().getWorldLocation(), config.maxUpdateDistance())) {
 				String starId = star.getWorld() + "_" + star.getWorldPoint().getX() + "_" + star.getWorldPoint().getY();
 				Long lastUpdate = lastStarUpdateTimes.getOrDefault(starId, 0L);
 
-				// Determine if we should update based on time elapsed and jitter
+				// Determine if we should update based on time elapsed
 				boolean shouldUpdate = false;
 
-				// Calculate jitter once per star and reuse it
+				// Add some jitter to prevent all clients updating at exactly the same time
 				double jitterFactor = 0.8 + (Math.random() * 0.4); // 0.8 to 1.2
 				int actualUpdateFrequency = (int)(baseUpdateFrequencyMs * jitterFactor);
 
@@ -536,58 +712,41 @@ public class StarhuntPlugin extends Plugin
 					shouldUpdate = true;
 				}
 
-				// Check for critical state changes that might warrant an immediate update
-				boolean tierChanged = checkTierChanged(star);
-				boolean existenceChanged = checkExistenceChanged(star);
-
-				if (tierChanged || existenceChanged) {
-					// For critical changes, update with a minimum interval of 1 second
-					// to prevent spamming during transitions
-					if (currentTime - lastUpdate >= 1000) {
-						shouldUpdate = true;
-					}
-				}
-
 				if (shouldUpdate) {
 					boolean updated = star.update(client);
 					if (updated) {
 						sendStarData(star);
 						lastStarUpdateTimes.put(starId, currentTime);
-
-						// Update in network stars
-						updateNetworkStar(star);
 					}
 				}
 			}
 		}
 	}
 
-	private boolean checkTierChanged(StarData star) {
-		// Logic to detect if tier has changed
-		int currentTier = -1;
-		if (star.getObject() != null) {
-			currentTier = StarData.getTier(star.getObject().getId());
-		}
-		return currentTier > 0 && currentTier != star.getTier();
-	}
-
-	private boolean checkExistenceChanged(StarData star) {
-		// Logic to detect if star has appeared/disappeared
-		boolean wasActive = star.isActive();
-		boolean isActive = star.getObject() != null || star.getNpc() != null;
-		return wasActive != isActive;
-	}
-
 	private void updateNetworkStar(StarData star) {
+		boolean found = false;
+
 		for (StarData networkStar : networkStars) {
 			if (networkStar.getWorld() == star.getWorld() &&
 					networkStar.getWorldPoint().equals(star.getWorldPoint())) {
 				networkStar.update(star);
-				if (starhuntPanel != null) {
-					starhuntPanel.updateStars(networkStars);
-				}
+				found = true;
 				break;
 			}
+		}
+
+		// If not found in network stars but is valid, add it
+		if (!found && star.getTier() > 0) {
+			networkStars.add(star);
+			// Sort stars by last update time (newest first)
+			networkStars.sort(Comparator.comparing(StarData::getLastUpdate).reversed());
+		}
+
+		// Update the panel
+		if (starhuntPanel != null) {
+			clientThread.invokeLater(() -> {
+				starhuntPanel.updateStars(networkStars);
+			});
 		}
 	}
 
@@ -610,7 +769,7 @@ public class StarhuntPlugin extends Plugin
 			socketManager.disconnect();
 			connected = false;
 			reconnectAttempts = 0;
-			connectToServer();
+			safeConnectToServer();
 		}
 	}
 
@@ -642,7 +801,24 @@ public class StarhuntPlugin extends Plugin
 
 		// If we removed any stars, update the panel
 		if (needsUpdate && starhuntPanel != null) {
-			starhuntPanel.updateStars(networkStars);
+			clientThread.invokeLater(() -> {
+				starhuntPanel.updateStars(networkStars);
+			});
+		}
+	}
+
+	/**
+	 * Periodically attempt to reconnect if not connected
+	 */
+	@Schedule(
+			period = 60,
+			unit = ChronoUnit.SECONDS
+	)
+	public void scheduledReconnect() {
+		if (!connected && reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+			log.debug("Scheduled reconnection attempt");
+			reconnectAttempts = 0; // Reset the counter for scheduled reconnects
+			safeConnectToServer();
 		}
 	}
 }

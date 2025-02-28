@@ -91,6 +91,8 @@ public class StarhuntPanel extends PluginPanel {
 
     private final JPanel starsContainer = new JPanel();
     private final PluginErrorPanel noStarsPanel = new PluginErrorPanel();
+    private final PluginErrorPanel disconnectedPanel = new PluginErrorPanel();
+    private final JLabel connectionStatusLabel = new JLabel();
 
     private final List<StarPanel> starPanels = new ArrayList<>();
 
@@ -110,6 +112,12 @@ public class StarhuntPanel extends PluginPanel {
         // Set up the "no stars" panel
         noStarsPanel.setContent("No stars found", "No shooting stars have been discovered yet.");
 
+        // Set up the "disconnected" panel
+        disconnectedPanel.setContent("Disconnected", "Not connected to the Star Hunt server. Star sharing is disabled.");
+        JButton reconnectButton = new JButton("Reconnect");
+        reconnectButton.addActionListener(e -> plugin.reconnectToServer());
+        disconnectedPanel.add(reconnectButton);
+
         // Add a header
         JPanel header = new JPanel();
         header.setLayout(new BorderLayout());
@@ -120,17 +128,55 @@ public class StarhuntPanel extends PluginPanel {
         title.setFont(FontManager.getRunescapeBoldFont());
         header.add(title, BorderLayout.WEST);
 
+        // Add connection status indicator
+        connectionStatusLabel.setFont(FontManager.getRunescapeSmallFont());
+        header.add(connectionStatusLabel, BorderLayout.EAST);
+
         add(header, BorderLayout.NORTH);
         add(starsContainer, BorderLayout.CENTER);
 
         showNoStarsMessage();
     }
 
+    /**
+     * Show the "no stars" message
+     */
     private void showNoStarsMessage() {
         starsContainer.removeAll();
         starsContainer.add(noStarsPanel);
         starsContainer.revalidate();
         starsContainer.repaint();
+    }
+
+    /**
+     * Show the disconnected message
+     */
+    public void showDisconnectedMessage() {
+        starsContainer.removeAll();
+        starsContainer.add(disconnectedPanel);
+        starsContainer.revalidate();
+        starsContainer.repaint();
+    }
+
+    /**
+     * Update the connection status indicator
+     * @param connected Whether the plugin is connected to the server
+     */
+    public void updateConnectionStatus(boolean connected) {
+        if (connected) {
+            connectionStatusLabel.setText("Connected");
+            connectionStatusLabel.setForeground(Color.GREEN);
+        } else {
+            connectionStatusLabel.setText("Disconnected");
+            connectionStatusLabel.setForeground(Color.RED);
+
+            // Also show disconnected message
+            showDisconnectedMessage();
+        }
+
+        // Force repaint
+        connectionStatusLabel.revalidate();
+        connectionStatusLabel.repaint();
     }
 
     public void updateStars(List<StarData> stars) {
